@@ -1,0 +1,30 @@
+[project]
+name = "captcha-solver-core"
+version = "1.0.0"
+description = "Modular local captcha solving system with OCR, Vision, Audio, and Behavior engines"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.20.0",
+    "playwright>=1.40.0",
+    "pytesseract>=0.3.10",
+    "opencv-python-headless>=4.8.0",
+    "Pillow>=10.0.0",
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "ultralytics>=8.0.0",
+    "open-clip-torch>=2.20.0",
+    "openai-whisper>=20230918",
+    "httpx>=0.25.0",
+    "aiohttp>=3.9.0",
+    "aiosqlite>=0.19.0",
+    "pydantic>=2.0.0",
+    "python-multipart>=0.0.6",
+]
+
+[project.scripts]
+captcha-solver = "captcha_solver_core.api.server:app"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
