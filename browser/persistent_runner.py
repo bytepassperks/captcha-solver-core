@@ -42,6 +42,10 @@ class PersistentBrowserRunner:
                 "Chrome/124.0.0.0 Safari/537.36"
             ),
             args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-features=IsolateOrigins,site-per-process",
                 "--disable-web-security",

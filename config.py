@@ -19,8 +19,8 @@ class Config:
     models_dir: Path = BASE_DIR / "models"
     logs_dir: Path = BASE_DIR / "logs"
 
-    # Browser
-    browser_headless: bool = False
+    # Browser (xvfb-run provides virtual display, so headed mode works in Docker)
+    browser_headless: bool = bool(os.getenv("BROWSER_HEADLESS", "false").lower() in ("true", "1"))
     browser_user_data_base: str = str(BASE_DIR / "profiles" / "chrome_data")
     viewport_width: int = 1280
     viewport_height: int = 800
@@ -30,7 +30,7 @@ class Config:
     tesseract_cmd: str = "tesseract"
     tesseract_lang: str = "eng"
 
-    # Vision (YOLOv8 + CLIP)
+    # Vision (YOLOv8 + CLIP) — model preloaded in Docker build
     yolo_model: str = "yolov8n.pt"
     yolo_confidence: float = 0.25
     clip_model: str = "ViT-B/32"
