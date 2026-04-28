@@ -1,4 +1,4 @@
-"""FastAPI server exposing the captcha solver as an API — v2.2.0."""
+"""FastAPI server exposing the captcha solver as an API — v2.3.0."""
 
 import asyncio
 import base64
@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from config import config
-from detector.captcha_detector import detect_from_html, CaptchaType
+from detector.captcha_detector import detect_from_html, detect_from_page, CaptchaType
 from router.dispatcher import Dispatcher, SolveRequest, SolveResult, get_cached_detection
 from engines.ocr_engine import OCREngine
 from engines.vision_engine import VisionEngine
@@ -60,7 +60,7 @@ test_runner = RandomSiteRunner(dispatcher=dispatcher)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
-    logger.info("Captcha Solver Core v2.2.0 starting up...")
+    logger.info("Captcha Solver Core v2.3.0 starting up...")
 
     # Speed Boost: YOLO warm-start at boot (CLIP lazy-loads on first vision request — too heavy for boot)
     logger.info("Warm-starting YOLO model...")
@@ -119,7 +119,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Captcha Solver Core",
     description="Modular captcha solving API with engine racing, adaptive routing, VPN identity routing, and continuous benchmarking",
-    version="2.2.0",
+    version="2.3.0",
     lifespan=lifespan,
 )
 
@@ -173,6 +173,24 @@ class HarvestTargetModel(BaseModel):
     pageurl: str
     min_tokens: int = 3
     max_tokens: int = 10
+
+
+class VerifySiteRequestModel(BaseModel):
+    url: str = Field(..., description="URL to verify captcha on")
+
+
+class VerifySiteResponseModel(BaseModel):
+    captcha_detected: bool = False
+    captcha_type: str | None = None
+    sitekey_present: bool = False
+    engine_selected: str | None = None
+    fallback_chain: list[str] = []
+    solve_attempted: bool = False
+    solve_success: bool = False
+    token: str | None = None
+    latency_ms: int = 0
+    confidence_score: float = 0.0
+    error: str | None = None
 
 
 # ─── Endpoints ───────────────────────────────────────────────────────
@@ -442,12 +460,205 @@ async def vpn_connect(region: str = "us"):
     }
 
 
+@app.post("/verify-site", response_model=VerifySiteResponseModel)
+async def verify_site(req: VerifySiteRequestModel):
+    """
+    Full pipeline site verification: render page with browser pool (JS enabled),
+    detect captcha (including JS-loaded widgets like MTCaptcha), attempt solve.
+    """
+    start = time.time()
+    result = VerifySiteResponseModel()
+
+    slot_idx = -1
+    page = None
+
+    try:
+        # Step 1: Acquire browser from pool and navigate with full JS rendering
+        runner, slot_idx = await browser_pool.acquire()
+        page = await runner.get_page()
+        logger.info(f"verify-site: navigating to {req.url}")
+        await page.goto(req.url, wait_until="networkidle", timeout=30000)
+        # Extra wait for JS-loaded captcha widgets (MTCaptcha, etc.)
+        await asyncio.sleep(3)
+
+        # Step 2: Use detect_from_page which checks rendered DOM + JS globals
+        detection = await detect_from_page(page)
+        logger.info(f"verify-site: detection result = {detection.captcha_type.value}, sitekey={detection.sitekey}")
+
+        result.captcha_type = detection.captcha_type.value
+        result.captcha_detected = detection.captcha_type != CaptchaType.NONE
+        result.sitekey_present = bool(detection.sitekey)
+        result.confidence_score = detection.confidence
+
+        if not result.captcha_detected:
+            # Check iframes (MTCaptcha loads via iframe from service.mtcaptcha.com)
+            for frame in page.frames:
+                if frame == page.main_frame:
+                    continue
+                try:
+                    frame_html = await frame.content()
+                    frame_det = detect_from_html(frame_html)
+                    if frame_det.captcha_type != CaptchaType.NONE:
+                        detection = frame_det
+                        result.captcha_type = detection.captcha_type.value
+                        result.captcha_detected = True
+                        result.sitekey_present = bool(detection.sitekey)
+                        result.confidence_score = detection.confidence
+                        break
+                except Exception:
+                    continue
+
+        if not result.captcha_detected:
+            # Visual element fallback
+            captcha_el = await page.query_selector(
+                'div[id*="mtcaptcha"], div[class*="mtcaptcha"], '
+                'img[src*="captcha"], canvas[class*="captcha"], '
+                'div[id*="captcha"] img'
+            )
+            if captcha_el:
+                result.captcha_detected = True
+                result.captcha_type = "mtcaptcha"
+                result.confidence_score = 0.8
+
+        if not result.captcha_detected:
+            result.latency_ms = int((time.time() - start) * 1000)
+            return result
+
+        # Step 3: Attempt to solve
+        result.solve_attempted = True
+
+        is_text_captcha = result.captcha_type in ("text", "text_image", "image_grid", "mtcaptcha")
+
+        if is_text_captcha:
+            # For MTCaptcha / text captchas: find the captcha image, screenshot it, OCR
+            captcha_el = None
+
+            # MTCaptcha renders inside an iframe — look for the captcha image there
+            for frame in page.frames:
+                try:
+                    el = await frame.query_selector(
+                        'img.mtcaptcha-image-text, '
+                        'img[class*="mtcaptcha"], '
+                        'canvas.mtcaptcha-canvas, '
+                        'div.mtcaptcha-image img, '
+                        'img[src*="captcha"]'
+                    )
+                    if el:
+                        captcha_el = el
+                        break
+                except Exception:
+                    continue
+
+            # Also check main page
+            if not captcha_el:
+                captcha_el = await page.query_selector(
+                    'div[id*="mtcaptcha"] img, '
+                    'img[src*="captcha"], '
+                    'canvas[class*="captcha"], '
+                    'div[id*="captcha"] img'
+                )
+
+            if captcha_el:
+                img_bytes = await captcha_el.screenshot()
+
+                # Solve via OCR engine
+                ocr_engine = dispatcher.engines.get("ocr")
+                if ocr_engine:
+                    solve_result = await ocr_engine.solve(
+                        captcha_type="text",
+                        pageurl=req.url,
+                        sitekey=detection.sitekey,
+                        image_data=img_bytes,
+                    )
+                    result.engine_selected = "ocr"
+                    result.fallback_chain = ["ocr", "vision"]
+                    result.solve_success = solve_result.get("success", False)
+                    result.token = solve_result.get("token")
+                    result.confidence_score = solve_result.get("confidence", 0.0)
+
+                    # If OCR solved, try to type into the captcha input
+                    if result.solve_success and result.token:
+                        captcha_input = None
+                        for frame in page.frames:
+                            try:
+                                inp = await frame.query_selector(
+                                    'input[name*="captcha"], '
+                                    'input[id*="mtcaptcha"], '
+                                    'input[placeholder*="captcha"], '
+                                    'input[aria-label*="captcha"]'
+                                )
+                                if inp:
+                                    captcha_input = inp
+                                    break
+                            except Exception:
+                                continue
+                        if captcha_input:
+                            await captcha_input.click()
+                            await captcha_input.fill("")
+                            await captcha_input.type(result.token, delay=80)
+                        else:
+                            result.error = "Solved but could not find captcha input field"
+                else:
+                    result.error = "OCR engine not available"
+
+                # Fallback to vision if OCR failed
+                if not result.solve_success:
+                    vision_engine = dispatcher.engines.get("vision")
+                    if vision_engine:
+                        img_b64 = base64.b64encode(img_bytes).decode()
+                        try:
+                            v_result = await vision_engine.solve(
+                                captcha_type="image_grid",
+                                pageurl=req.url,
+                                image_data=img_bytes,
+                            )
+                            if v_result.get("success"):
+                                result.engine_selected = "vision"
+                                result.solve_success = True
+                                result.token = v_result.get("token")
+                                result.confidence_score = v_result.get("confidence", 0.0)
+                        except Exception as ve:
+                            logger.debug(f"Vision fallback failed: {ve}")
+            else:
+                result.error = "Captcha detected but could not locate image element for OCR"
+        else:
+            # Widget-based captchas (reCAPTCHA, hCaptcha, Turnstile) — use dispatcher racing
+            solve_req = SolveRequest(
+                captcha_type=detection.captcha_type.value,
+                pageurl=req.url,
+                sitekey=detection.sitekey,
+            )
+            solve_result = await dispatcher.solve(solve_req, detection)
+            result.engine_selected = solve_result.engine_used
+            result.fallback_chain = [solve_result.engine_used] if solve_result.engine_used else []
+            result.solve_success = solve_result.success
+            result.token = solve_result.token
+            result.confidence_score = solve_result.confidence
+            if solve_result.error:
+                result.error = solve_result.error
+
+    except Exception as e:
+        result.error = str(e)
+        logger.error(f"verify-site error for {req.url}: {e}")
+    finally:
+        if page:
+            try:
+                await page.close()
+            except Exception:
+                pass
+        if slot_idx >= 0:
+            browser_pool.release(slot_idx)
+        result.latency_ms = int((time.time() - start) * 1000)
+
+    return result
+
+
 @app.get("/health")
 async def health():
     """Health check."""
     return {
         "status": "ok",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "engines": list(dispatcher.engines.keys()),
         "cache": cache.get_stats(),
         "browser_pool": {
@@ -483,7 +694,7 @@ async def health():
 async def root():
     return {
         "service": "Captcha Solver Core",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "endpoints": {
             "POST /solve": "Solve a captcha (main endpoint)",
             "POST /solve/image": "Solve from uploaded image",

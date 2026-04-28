@@ -13,6 +13,7 @@ class CaptchaType(str, Enum):
     RECAPTCHA_V3 = "recaptcha_v3"
     HCAPTCHA = "hcaptcha"
     TURNSTILE = "turnstile"
+    MTCAPTCHA = "mtcaptcha"
     TEXT = "text"
     IMAGE_GRID = "image_grid"
     NONE = "none"
@@ -67,6 +68,14 @@ DETECTION_PATTERNS = {
         r'click.*all.*images',
         r'image.*challenge',
     ],
+    CaptchaType.MTCAPTCHA: [
+        r'mtcaptcha',
+        r'service\.mtcaptcha\.com',
+        r'MTPublic-',
+        r'mtcap-',
+        r'mtcaptcha-verifiedtoken',
+        r'data-sitekey.*MTPublic',
+    ],
 }
 
 SITEKEY_PATTERNS = {
@@ -85,6 +94,13 @@ SITEKEY_PATTERNS = {
         r'data-sitekey="([^"]+)"',
         r"data-sitekey='([^']+)'",
         r'sitekey["\s:=]+([0-9A-Za-z_-]+)',
+    ],
+    CaptchaType.MTCAPTCHA: [
+        r'data-sitekey="(MTPublic-[^"]+)"',
+        r"data-sitekey='(MTPublic-[^']+)'",
+        r'sitekey["\s:=]+(MTPublic-[A-Za-z0-9]+)',
+        r"'sitekey'\s*:\s*'(MTPublic-[^']+)'",
+        r'"sitekey"\s*:\s*"(MTPublic-[^"]+)"',
     ],
 }
 
@@ -185,6 +201,37 @@ async def detect_from_page(page) -> DetectionResult:
                 return DetectionResult(
                     captcha_type=CaptchaType.TURNSTILE,
                     confidence=0.8,
+                )
+
+            # Check for MTCaptcha (loaded via iframe from service.mtcaptcha.com)
+            has_mtcaptcha = await page.evaluate("""
+                () => {
+                    const el = document.querySelector('[id*="mtcaptcha"], [class*="mtcaptcha"], div[id*="mtcap"]');
+                    if (el) return true;
+                    const iframes = document.querySelectorAll('iframe');
+                    for (const f of iframes) {
+                        if (f.src && f.src.includes('mtcaptcha')) return true;
+                    }
+                    return false;
+                }
+            """)
+            if has_mtcaptcha:
+                sitekey = await page.evaluate("""
+                    () => {
+                        const el = document.querySelector('[data-sitekey]');
+                        if (el) return el.getAttribute('data-sitekey');
+                        const scripts = document.querySelectorAll('script');
+                        for (const s of scripts) {
+                            const m = s.textContent.match(/sitekey['"]?\s*[:=]\s*['"]?(MTPublic-[^'"\s,}]+)/);
+                            if (m) return m[1];
+                        }
+                        return null;
+                    }
+                """)
+                return DetectionResult(
+                    captcha_type=CaptchaType.MTCAPTCHA,
+                    sitekey=sitekey,
+                    confidence=0.95,
                 )
         except Exception as e:
             logger.debug(f"JS detection failed: {e}")

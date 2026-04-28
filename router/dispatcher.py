@@ -41,6 +41,7 @@ DEFAULT_ROUTING = {
     CaptchaType.RECAPTCHA_V3: ["token_harvest"],
     CaptchaType.HCAPTCHA: ["vision", "audio"],
     CaptchaType.TURNSTILE: ["behavior"],
+    CaptchaType.MTCAPTCHA: ["ocr", "vision"],
 }
 
 # Domain -> captcha_type detection cache (Speed Boost: detector caching)
