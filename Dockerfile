@@ -55,4 +55,3 @@ RUN mkdir -p profiles/cookie_farm profiles/chrome_data dataset/captcha_tiles mod
 EXPOSE 8000
 
 CMD ["uvicorn", "api.server:app", "--host", "0.0.0.0", "--port", "8000"]
-# Trigger rebuild on Standard plan

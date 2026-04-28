@@ -8,7 +8,7 @@ from pathlib import Path
 
 import httpx
 
-from captcha_solver_core.config import config
+from config import config
 
 logger = logging.getLogger(__name__)
 

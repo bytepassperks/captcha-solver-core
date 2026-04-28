@@ -5,11 +5,11 @@ import logging
 import time
 from dataclasses import dataclass
 
-from captcha_solver_core.config import config
-from captcha_solver_core.cache.token_cache import TokenCache
-from captcha_solver_core.browser.persistent_runner import PersistentBrowserRunner
-from captcha_solver_core.engines.token_engine import TokenEngine
-from captcha_solver_core.detector.captcha_detector import CaptchaType
+from config import config
+from cache.token_cache import TokenCache
+from browser.persistent_runner import PersistentBrowserRunner
+from engines.token_engine import TokenEngine
+from detector.captcha_detector import CaptchaType
 
 logger = logging.getLogger(__name__)
 

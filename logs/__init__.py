@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime
 
-from captcha_solver_core.config import config
+from config import config
 
 _LOG_DB = config.logs_dir / "telemetry.db"
 

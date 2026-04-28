@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from captcha_solver_core.config import config
+from config import config
 
 logger = logging.getLogger(__name__)
 

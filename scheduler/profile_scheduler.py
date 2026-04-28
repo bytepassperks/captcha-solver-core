@@ -8,9 +8,9 @@ import time
 from pathlib import Path
 from datetime import datetime
 
-from captcha_solver_core.config import config
-from captcha_solver_core.browser.persistent_runner import PersistentBrowserRunner
-from captcha_solver_core.engines.behavior_engine import BehaviorEngine
+from config import config
+from browser.persistent_runner import PersistentBrowserRunner
+from engines.behavior_engine import BehaviorEngine
 
 logger = logging.getLogger(__name__)
 

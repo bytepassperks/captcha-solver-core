@@ -10,19 +10,19 @@ from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from captcha_solver_core.config import config
-from captcha_solver_core.detector.captcha_detector import detect_from_html, CaptchaType
-from captcha_solver_core.router.dispatcher import Dispatcher, SolveRequest, SolveResult
-from captcha_solver_core.engines.ocr_engine import OCREngine
-from captcha_solver_core.engines.vision_engine import VisionEngine
-from captcha_solver_core.engines.audio_engine import AudioEngine
-from captcha_solver_core.engines.token_engine import TokenEngine
-from captcha_solver_core.engines.behavior_engine import BehaviorEngine
-from captcha_solver_core.cache.token_cache import TokenCache
-from captcha_solver_core.browser.persistent_runner import PersistentBrowserRunner
-from captcha_solver_core.engines.preharvest_daemon import PreharvestDaemon
-from captcha_solver_core.scheduler.profile_scheduler import ProfileScheduler
-from captcha_solver_core.logs import setup_logging, log_solve, get_stats
+from config import config
+from detector.captcha_detector import detect_from_html, CaptchaType
+from router.dispatcher import Dispatcher, SolveRequest, SolveResult
+from engines.ocr_engine import OCREngine
+from engines.vision_engine import VisionEngine
+from engines.audio_engine import AudioEngine
+from engines.token_engine import TokenEngine
+from engines.behavior_engine import BehaviorEngine
+from cache.token_cache import TokenCache
+from browser.persistent_runner import PersistentBrowserRunner
+from engines.preharvest_daemon import PreharvestDaemon
+from scheduler.profile_scheduler import ProfileScheduler
+from logs import setup_logging, log_solve, get_stats
 
 logger = logging.getLogger(__name__)
 

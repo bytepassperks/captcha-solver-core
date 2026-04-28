@@ -9,7 +9,7 @@ from datetime import datetime
 
 import httpx
 
-from captcha_solver_core.config import config
+from config import config
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ class FirecrawlCollector:
             if data:
                 html = data.get("html", "")
                 # Check for captcha signals
-                from captcha_solver_core.detector.captcha_detector import detect_from_html
+                from detector.captcha_detector import detect_from_html
                 detection = detect_from_html(html)
                 if detection.captcha_type.value != "none":
                     entry = {

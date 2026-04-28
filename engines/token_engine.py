@@ -4,8 +4,8 @@ import asyncio
 import logging
 import time
 
-from captcha_solver_core.config import config
-from captcha_solver_core.detector.captcha_detector import CaptchaType
+from config import config
+from detector.captcha_detector import CaptchaType
 
 logger = logging.getLogger(__name__)
 

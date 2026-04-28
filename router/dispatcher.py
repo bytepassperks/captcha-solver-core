@@ -3,7 +3,7 @@
 import logging
 from dataclasses import dataclass
 
-from captcha_solver_core.detector.captcha_detector import CaptchaType, DetectionResult
+from detector.captcha_detector import CaptchaType, DetectionResult
 
 logger = logging.getLogger(__name__)
 

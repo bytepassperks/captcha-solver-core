@@ -5,7 +5,7 @@ import logging
 import random
 from pathlib import Path
 
-from captcha_solver_core.config import config
+from config import config
 
 logger = logging.getLogger(__name__)
 
