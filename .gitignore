@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Runtime data
+profiles/chrome_data/
+profiles/cookie_farm/scheduler_state.json
+cache/tokens.db
+logs/*.log
+logs/telemetry.db
+dataset/captcha_tiles/
+models/*.pt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Env
+.env
+.env.*
