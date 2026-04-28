@@ -82,65 +82,55 @@ class Dispatcher:
 
         logger.info(f"Routing {ctype.value} to engine: {engine_name}")
 
-        try:
-            result = await engine.solve(
-                captcha_type=ctype,
-                pageurl=request.pageurl,
-                sitekey=request.sitekey or (detection.sitekey if detection else None),
-                image_data=request.captcha_image,
-                image_url=request.captcha_image_url,
-                extra=request.extra,
-            )
+        # Try all engines in priority order with fallback on failure
+        routing_table = {
+            CaptchaType.TEXT: ["ocr"],
+            CaptchaType.IMAGE_GRID: ["vision"],
+            CaptchaType.RECAPTCHA_V2: ["token_harvest", "audio"],
+            CaptchaType.RECAPTCHA_V3: ["token_harvest"],
+            CaptchaType.HCAPTCHA: ["vision", "audio"],
+            CaptchaType.TURNSTILE: ["behavior"],
+        }
+        engine_priority = routing_table.get(ctype, [])
+        last_error = None
 
-            elapsed_ms = int((time.time() - start) * 1000)
+        for try_name in engine_priority:
+            if try_name not in self.engines:
+                continue
+            try_engine = self.engines[try_name]
+            try:
+                result = await try_engine.solve(
+                    captcha_type=ctype,
+                    pageurl=request.pageurl,
+                    sitekey=request.sitekey or (detection.sitekey if detection else None),
+                    image_data=request.captcha_image,
+                    image_url=request.captcha_image_url,
+                    extra=request.extra,
+                )
 
-            return SolveResult(
-                success=result.get("success", False),
-                token=result.get("token"),
-                engine_used=engine_name,
-                confidence=result.get("confidence", 0.0),
-                solve_time_ms=elapsed_ms,
-                error=result.get("error"),
-            )
+                if result.get("success"):
+                    elapsed_ms = int((time.time() - start) * 1000)
+                    return SolveResult(
+                        success=True,
+                        token=result.get("token"),
+                        engine_used=try_name,
+                        confidence=result.get("confidence", 0.0),
+                        solve_time_ms=elapsed_ms,
+                        error=None,
+                    )
 
-        except Exception as e:
-            elapsed_ms = int((time.time() - start) * 1000)
-            logger.exception(f"Engine {engine_name} failed: {e}")
+                last_error = result.get("error", f"{try_name} failed")
+                logger.info(f"Engine {try_name} returned success=false: {last_error}, trying next...")
 
-            # Try fallback engines
-            routing_table = {
-                CaptchaType.RECAPTCHA_V2: ["audio", "token_harvest"],
-                CaptchaType.HCAPTCHA: ["audio", "vision"],
-            }
-            fallbacks = routing_table.get(ctype, [])
-            for fb_name in fallbacks:
-                if fb_name != engine_name and fb_name in self.engines:
-                    logger.info(f"Trying fallback engine: {fb_name}")
-                    try:
-                        fb_engine = self.engines[fb_name]
-                        result = await fb_engine.solve(
-                            captcha_type=ctype,
-                            pageurl=request.pageurl,
-                            sitekey=request.sitekey or (detection.sitekey if detection else None),
-                            image_data=request.captcha_image,
-                            image_url=request.captcha_image_url,
-                            extra=request.extra,
-                        )
-                        elapsed_ms = int((time.time() - start) * 1000)
-                        return SolveResult(
-                            success=result.get("success", False),
-                            token=result.get("token"),
-                            engine_used=fb_name,
-                            confidence=result.get("confidence", 0.0),
-                            solve_time_ms=elapsed_ms,
-                            error=result.get("error"),
-                        )
-                    except Exception as fb_e:
-                        logger.warning(f"Fallback engine {fb_name} also failed: {fb_e}")
+            except Exception as e:
+                last_error = str(e)
+                logger.exception(f"Engine {try_name} raised exception: {e}")
 
-            return SolveResult(
-                success=False,
-                error=f"All engines failed: {str(e)}",
-                engine_used=engine_name,
-                solve_time_ms=elapsed_ms,
-            )
+        # All engines exhausted
+        elapsed_ms = int((time.time() - start) * 1000)
+        return SolveResult(
+            success=False,
+            error=last_error or f"No engine could solve {ctype.value}",
+            engine_used=engine_name,
+            solve_time_ms=elapsed_ms,
+        )
