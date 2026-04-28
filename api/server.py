@@ -530,37 +530,62 @@ async def verify_site(req: VerifySiteRequestModel):
         is_text_captcha = result.captcha_type in ("text", "text_image", "image_grid", "mtcaptcha")
 
         if is_text_captcha:
-            # For MTCaptcha / text captchas: find the captcha image, screenshot it, OCR
+            img_bytes = None
             captcha_el = None
 
-            # MTCaptcha renders inside an iframe — look for the captcha image there
-            for frame in page.frames:
-                try:
-                    el = await frame.query_selector(
-                        'img.mtcaptcha-image-text, '
-                        'img[class*="mtcaptcha"], '
-                        'canvas.mtcaptcha-canvas, '
-                        'div.mtcaptcha-image img, '
-                        'img[src*="captcha"]'
-                    )
-                    if el:
-                        captcha_el = el
+            # Strategy 1: For MTCaptcha, screenshot the widget container from main page
+            # (cross-origin iframes block direct element access, but we can screenshot the visible widget)
+            if result.captcha_type == "mtcaptcha":
+                # Find the MTCaptcha container div on the main page
+                for selector in [
+                    'div[id*="mtcap"]',
+                    'div[class*="mtcaptcha"]',
+                    'div[id*="mtcaptcha"]',
+                    'iframe[src*="mtcaptcha"]',
+                ]:
+                    captcha_el = await page.query_selector(selector)
+                    if captcha_el:
                         break
-                except Exception:
-                    continue
 
-            # Also check main page
-            if not captcha_el:
-                captcha_el = await page.query_selector(
-                    'div[id*="mtcaptcha"] img, '
-                    'img[src*="captcha"], '
-                    'canvas[class*="captcha"], '
-                    'div[id*="captcha"] img'
-                )
+                if captcha_el:
+                    img_bytes = await captcha_el.screenshot()
+                    logger.info("verify-site: screenshotted MTCaptcha widget container")
 
-            if captcha_el:
-                img_bytes = await captcha_el.screenshot()
+            # Strategy 2: Search iframe contents for captcha image elements
+            if not img_bytes:
+                for frame in page.frames:
+                    if frame == page.main_frame:
+                        continue
+                    try:
+                        el = await frame.query_selector(
+                            'img.mtcaptcha-image-text, '
+                            'img[class*="mtcaptcha"], '
+                            'canvas.mtcaptcha-canvas, '
+                            'div.mtcaptcha-image img, '
+                            'img[src*="captcha"]'
+                        )
+                        if el:
+                            img_bytes = await el.screenshot()
+                            logger.info("verify-site: screenshotted captcha image from iframe")
+                            break
+                    except Exception:
+                        continue
 
+            # Strategy 3: Check main page for captcha images
+            if not img_bytes:
+                for selector in [
+                    'div[id*="mtcaptcha"] img',
+                    'img[src*="captcha"]',
+                    'canvas[class*="captcha"]',
+                    'div[id*="captcha"] img',
+                ]:
+                    captcha_el = await page.query_selector(selector)
+                    if captcha_el:
+                        img_bytes = await captcha_el.screenshot()
+                        logger.info(f"verify-site: screenshotted captcha element via {selector}")
+                        break
+
+            if img_bytes:
                 # Solve via OCR engine
                 ocr_engine = dispatcher.engines.get("ocr")
                 if ocr_engine:
@@ -579,6 +604,7 @@ async def verify_site(req: VerifySiteRequestModel):
                     # If OCR solved, try to type into the captcha input
                     if result.solve_success and result.token:
                         captcha_input = None
+                        # Search all frames for input field
                         for frame in page.frames:
                             try:
                                 inp = await frame.query_selector(
@@ -605,7 +631,6 @@ async def verify_site(req: VerifySiteRequestModel):
                 if not result.solve_success:
                     vision_engine = dispatcher.engines.get("vision")
                     if vision_engine:
-                        img_b64 = base64.b64encode(img_bytes).decode()
                         try:
                             v_result = await vision_engine.solve(
                                 captcha_type="image_grid",
