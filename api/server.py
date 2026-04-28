@@ -604,26 +604,27 @@ async def verify_site(req: VerifySiteRequestModel):
                     # If OCR solved, try to type into the captcha input
                     if result.solve_success and result.token:
                         captcha_input = None
-                        # Search all frames for input field
-                        for frame in page.frames:
-                            try:
-                                inp = await frame.query_selector(
-                                    'input[name*="captcha"], '
-                                    'input[id*="mtcaptcha"], '
-                                    'input[placeholder*="captcha"], '
-                                    'input[aria-label*="captcha"]'
-                                )
-                                if inp:
-                                    captcha_input = inp
-                                    break
-                            except Exception:
-                                continue
-                        if captcha_input:
-                            await captcha_input.click()
-                            await captcha_input.fill("")
-                            await captcha_input.type(result.token, delay=80)
-                        else:
-                            result.error = "Solved but could not find captcha input field"
+                        try:
+                            for frame in page.frames:
+                                try:
+                                    inp = await frame.query_selector(
+                                        'input[name*="captcha"], '
+                                        'input[id*="mtcaptcha"], '
+                                        'input[placeholder*="captcha"], '
+                                        'input[aria-label*="captcha"]'
+                                    )
+                                    if inp:
+                                        captcha_input = inp
+                                        break
+                                except Exception:
+                                    continue
+                            if captcha_input:
+                                await captcha_input.click(timeout=5000)
+                                await captcha_input.fill("")
+                                await captcha_input.type(result.token, delay=80)
+                        except Exception as type_err:
+                            logger.debug(f"Could not type token into input: {type_err}")
+                            # Solve still succeeded — token is available for API consumer
                 else:
                     result.error = "OCR engine not available"
 
