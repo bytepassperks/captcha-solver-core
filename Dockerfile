@@ -57,12 +57,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY . .
 
 # Create required directories
-RUN mkdir -p profiles/cookie_farm profiles/chrome_data dataset/captcha_tiles models logs cache
+RUN mkdir -p profiles/cookie_farm profiles/chrome_data dataset/captcha_tiles models logs cache && \
+    chmod +x start.sh
 
 # Persistent volume mount point for browser profiles (cookies survive restarts)
 VOLUME /app/profiles
 
 EXPOSE 8000
 
-# Start with xvfb-run so Playwright can run headed Chromium (needed for token harvest + behavior engines)
-CMD ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1280x800x24", "uvicorn", "api.server:app", "--host", "0.0.0.0", "--port", "8000"]
+# Start Xvfb in background then uvicorn (xvfb-run blocks port binding)
+CMD ["./start.sh"]
