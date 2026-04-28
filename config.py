@@ -63,12 +63,12 @@ class Config:
         "https://www.reddit.com",
         "https://stackoverflow.com",
     ])
-    farm_profile_count: int = 5
+    farm_profile_count: int = 2  # reduced for 2GB RAM (scheduler warms sequentially)
     farm_warmup_duration_min: int = 3
 
-    # Browser pool (adaptive scaling)
-    browser_pool_size: int = 3
-    browser_pool_max_size: int = 5  # auto-scale up to this when queue > 2
+    # Browser pool (adaptive scaling — start small for 2GB RAM, scale up on demand)
+    browser_pool_size: int = 2
+    browser_pool_max_size: int = 4  # auto-scale up to this when queue > 2
 
     # Scheduler
     profile_rotation_interval_hours: int = 12

@@ -56,15 +56,15 @@ async def lifespan(app: FastAPI):
     setup_logging()
     logger.info("Captcha Solver Core v2.1.0 starting up...")
 
-    # Speed Boost: YOLO + CLIP warm-start at boot
-    logger.info("Warm-starting YOLO + CLIP models...")
+    # Speed Boost: YOLO warm-start at boot (CLIP lazy-loads on first vision request — too heavy for boot)
+    logger.info("Warm-starting YOLO model...")
     try:
         vision_engine = dispatcher.engines.get("vision")
         if vision_engine:
-            vision_engine.warm_start()
-            logger.info("YOLO + CLIP models warm-started successfully")
+            vision_engine._load_yolo()
+            logger.info("YOLO model warm-started successfully")
     except Exception as e:
-        logger.warning(f"Model warm-start failed (will lazy-load on first request): {e}")
+        logger.warning(f"YOLO warm-start failed (will lazy-load on first request): {e}")
 
     # Start browser pool (adaptive scaling enabled)
     try:
@@ -73,8 +73,11 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Browser pool start failed: {e}")
 
-    # Start scheduler in background
-    scheduler_task = asyncio.create_task(scheduler.run_scheduler())
+    # Start profile scheduler in background (delayed to avoid boot OOM)
+    async def _delayed_scheduler():
+        await asyncio.sleep(60)  # wait 60s for boot to stabilize before warming profiles
+        await scheduler.run_scheduler()
+    scheduler_task = asyncio.create_task(_delayed_scheduler())
 
     # Start random site benchmark scheduler
     test_runner.start_scheduler(interval_hours=config.test_runner_interval_hours)
@@ -401,7 +404,7 @@ async def health():
             "whisper_model": config.whisper_model,
             "browser_pool_size": config.browser_pool_size,
             "browser_pool_max_size": config.browser_pool_max_size,
-            "clip_preloaded": True,
+            "clip_mode": "lazy_load",
         },
     }
 
