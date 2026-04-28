@@ -257,6 +257,15 @@ async def detect_captcha(req: DetectRequestModel):
             )
 
     result = detect_from_html(req.html)
+
+    # Cache the detection result for this domain
+    if req.url and config.detector_cache_enabled:
+        from urllib.parse import urlparse
+        domain = urlparse(req.url).netloc
+        if domain:
+            from router.dispatcher import cache_detection
+            cache_detection(domain, result.captcha_type)
+
     return DetectResponseModel(
         captcha_type=result.captcha_type.value,
         sitekey=result.sitekey,
