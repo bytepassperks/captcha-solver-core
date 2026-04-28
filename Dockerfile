@@ -15,12 +15,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install Python deps
-COPY pyproject.toml .
-RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir fastapi uvicorn[standard] playwright pytesseract \
-    opencv-python-headless Pillow httpx aiohttp aiosqlite pydantic python-multipart \
-    ultralytics open-clip-torch openai-whisper && \
+# Install core Python deps first (lightweight)
+RUN pip install --no-cache-dir \
+    fastapi \
+    "uvicorn[standard]" \
+    pytesseract \
+    opencv-python-headless \
+    Pillow \
+    httpx \
+    aiohttp \
+    aiosqlite \
+    pydantic \
+    python-multipart
+
+# Install PyTorch CPU-only (smaller footprint)
+RUN pip install --no-cache-dir \
+    torch torchvision \
+    --index-url https://download.pytorch.org/whl/cpu
+
+# Install ML packages (these depend on torch)
+RUN pip install --no-cache-dir \
+    ultralytics \
+    open-clip-torch
+
+# Install Whisper separately (pulls in additional deps)
+RUN pip install --no-cache-dir openai-whisper
+
+# Install Playwright and Chromium
+RUN pip install --no-cache-dir playwright && \
     playwright install chromium && \
     playwright install-deps chromium
 
