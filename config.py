@@ -36,7 +36,7 @@ class Config:
     clip_model: str = "ViT-B/32"
 
     # Audio
-    whisper_model: str = "base"
+    whisper_model: str = "tiny"
     vapi_api_key: str = os.getenv("VAPI_API_KEY", "")
     vapi_base_url: str = "https://api.vapi.ai"
 
@@ -44,8 +44,9 @@ class Config:
     firecrawl_api_key: str = os.getenv("FIRECRAWL_API_KEY", "")
     reducto_api_key: str = os.getenv("REDUCTO_API_KEY", "")
 
-    # Token cache
+    # Token cache (hot cache in-memory, persistent on disk)
     cache_db_path: str = str(BASE_DIR / "cache" / "tokens.db")
+    cache_use_memory: bool = True  # SQLite :memory: for hot tokens
     token_ttl_seconds: int = 110  # reCAPTCHA tokens expire in ~120s
 
     # Behavior simulation
@@ -65,8 +66,22 @@ class Config:
     farm_profile_count: int = 5
     farm_warmup_duration_min: int = 3
 
+    # Browser pool
+    browser_pool_size: int = 3
+
     # Scheduler
     profile_rotation_interval_hours: int = 12
+
+    # Random site test runner
+    allowed_test_domains: list = field(default_factory=list)  # empty = allow all demo targets
+    test_runner_interval_hours: float = 6.0
+
+    # Async engine racing
+    engine_racing_enabled: bool = True  # race engines in parallel (FIRST_COMPLETED)
+
+    # Telemetry-guided routing
+    adaptive_routing_enabled: bool = True  # reorder engine priority based on stats
+    adaptive_min_samples: int = 5  # min solves before adapting
 
     # Logging
     log_level: str = "INFO"

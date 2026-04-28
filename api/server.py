@@ -20,14 +20,17 @@ from engines.token_engine import TokenEngine
 from engines.behavior_engine import BehaviorEngine
 from cache.token_cache import TokenCache
 from browser.persistent_runner import PersistentBrowserRunner
+from browser.browser_pool import BrowserPool
 from engines.preharvest_daemon import PreharvestDaemon
 from scheduler.profile_scheduler import ProfileScheduler
+from test_runner.random_site_runner import RandomSiteRunner
 from logs import setup_logging, log_solve, get_stats
 
 logger = logging.getLogger(__name__)
 
 # Globals
 cache = TokenCache()
+browser_pool = BrowserPool()
 browser_runner = PersistentBrowserRunner()
 scheduler = ProfileScheduler()
 daemon = PreharvestDaemon(cache=cache)
@@ -44,6 +47,11 @@ def _build_engines() -> dict:
 
 
 dispatcher = Dispatcher(engines=_build_engines())
+# Wire adaptive routing stats
+dispatcher.set_stats_provider(get_stats)
+
+# Test runner (uses dispatcher)
+test_runner = RandomSiteRunner(dispatcher=dispatcher)
 
 
 @asynccontextmanager
@@ -51,17 +59,37 @@ async def lifespan(app: FastAPI):
     setup_logging()
     logger.info("Captcha Solver Core starting up...")
 
-    # Start browser (lazy — only when first solve request comes in)
-    # Start pre-harvest daemon if targets are configured
+    # Speed Boost #7: YOLO warm-start at boot
+    logger.info("Warm-starting YOLO model...")
+    try:
+        vision_engine = dispatcher.engines.get("vision")
+        if vision_engine:
+            vision_engine._load_yolo()
+            logger.info("YOLO model warm-started successfully")
+    except Exception as e:
+        logger.warning(f"YOLO warm-start failed (will lazy-load on first request): {e}")
+
+    # Speed Boost #1: Start browser pool
+    try:
+        await browser_pool.start()
+        logger.info(f"Browser pool started: {browser_pool.active_count} contexts")
+    except Exception as e:
+        logger.warning(f"Browser pool start failed: {e}")
+
     # Start scheduler in background
     scheduler_task = asyncio.create_task(scheduler.run_scheduler())
+
+    # Start random site test scheduler
+    test_runner.start_scheduler(interval_hours=config.test_runner_interval_hours)
 
     yield
 
     # Shutdown
     scheduler.stop()
     scheduler_task.cancel()
+    test_runner.stop_scheduler()
     await daemon.stop()
+    await browser_pool.stop()
     await browser_runner.stop()
     logger.info("Captcha Solver Core shut down.")
 
@@ -69,7 +97,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Captcha Solver Core",
     description="Modular local captcha solving API — OCR, Vision, Audio, Token Harvest, Behavior Simulation",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -163,7 +191,6 @@ async def solve_captcha(req: SolveRequestModel):
     # Auto-detect if needed
     detection = None
     if req.captcha_type == "auto" and req.pageurl:
-        # Could fetch the page and detect, but for API use we expect type to be provided
         pass
 
     result = await dispatcher.solve(solve_req, detection)
@@ -281,14 +308,58 @@ async def solver_stats(hours: int = 24):
     return get_stats(hours)
 
 
+@app.post("/run_random_tests")
+async def run_random_tests():
+    """Trigger a single random-site test evaluation pass. Returns results."""
+    summary = await test_runner.run_once()
+    return summary
+
+
+@app.get("/test_runner/results")
+async def test_runner_results(count: int = 20):
+    """Get recent random-site test results."""
+    return test_runner.get_latest_results(count)
+
+
+@app.get("/test_runner/status")
+async def test_runner_status():
+    """Get test runner scheduler status."""
+    return {
+        "scheduler_running": test_runner._running,
+        "targets": test_runner.targets,
+        "interval_hours": config.test_runner_interval_hours,
+    }
+
+
+@app.get("/pool/status")
+async def pool_status():
+    """Get browser pool status."""
+    return {
+        "active": browser_pool.active_count,
+        "busy": browser_pool.busy_count,
+        "pool_size": browser_pool.size,
+    }
+
+
 @app.get("/health")
 async def health():
     """Health check."""
     return {
         "status": "ok",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "engines": list(dispatcher.engines.keys()),
         "cache": cache.get_stats(),
+        "browser_pool": {
+            "active": browser_pool.active_count,
+            "busy": browser_pool.busy_count,
+        },
+        "features": {
+            "engine_racing": config.engine_racing_enabled,
+            "adaptive_routing": config.adaptive_routing_enabled,
+            "memory_cache": config.cache_use_memory,
+            "whisper_model": config.whisper_model,
+            "browser_pool_size": config.browser_pool_size,
+        },
     }
 
 
@@ -296,7 +367,7 @@ async def health():
 async def root():
     return {
         "service": "Captcha Solver Core",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "endpoints": {
             "POST /solve": "Solve a captcha (main endpoint)",
             "POST /solve/image": "Solve from uploaded image",
@@ -306,6 +377,10 @@ async def root():
             "GET /harvest/status": "Pre-harvest daemon status",
             "GET /cache/stats": "Token cache statistics",
             "GET /stats": "Solver telemetry",
+            "POST /run_random_tests": "Run random site captcha tests",
+            "GET /test_runner/results": "Get recent test results",
+            "GET /test_runner/status": "Test runner scheduler status",
+            "GET /pool/status": "Browser pool status",
             "GET /health": "Health check",
         },
     }

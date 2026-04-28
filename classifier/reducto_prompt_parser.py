@@ -1,5 +1,6 @@
-"""Prompt classifier using Reducto API or local NLP fallback."""
+"""Prompt classifier using Reducto API or local NLP fallback, with hash-based caching."""
 
+import hashlib
 import re
 import logging
 
@@ -8,6 +9,9 @@ import httpx
 from config import config
 
 logger = logging.getLogger(__name__)
+
+# In-memory prompt classification cache: prompt_hash -> result dict
+_prompt_cache: dict[str, dict] = {}
 
 # Common captcha prompt patterns and their object labels
 PROMPT_PATTERNS = [
@@ -131,8 +135,13 @@ async def parse_prompt_reducto(prompt: str) -> dict:
 
 
 async def classify(prompt: str) -> dict:
-    """Main entry: classify a captcha prompt and extract the target object."""
-    # Try Reducto first, fall back to local
+    """Main entry: classify a captcha prompt and extract the target object (cached)."""
+    cache_key = hashlib.md5(prompt.lower().strip().encode()).hexdigest()
+    if cache_key in _prompt_cache:
+        logger.debug(f"Prompt cache hit for '{prompt}'")
+        return _prompt_cache[cache_key]
+
     result = await parse_prompt_reducto(prompt)
+    _prompt_cache[cache_key] = result
     logger.info(f"Prompt '{prompt}' -> object='{result['object']}', type={result['challenge_type']}")
     return result
