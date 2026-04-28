@@ -1,4 +1,4 @@
-"""Route captcha solve requests to the appropriate engine with adaptive routing and racing."""
+"""Route captcha solve requests to the appropriate engine with adaptive routing, racing, and arbitration."""
 
 import asyncio
 import logging
@@ -43,24 +43,83 @@ DEFAULT_ROUTING = {
     CaptchaType.TURNSTILE: ["behavior"],
 }
 
+# Domain -> captcha_type detection cache (Speed Boost: detector caching)
+_detection_cache: dict[str, CaptchaType] = {}
+
+
+def cache_detection(domain: str, ctype: CaptchaType):
+    """Cache a detection result for a domain (saves 150-400ms on repeat visits)."""
+    if ctype != CaptchaType.NONE:
+        _detection_cache[domain] = ctype
+
+
+def get_cached_detection(domain: str) -> CaptchaType | None:
+    """Get cached detection for a domain."""
+    return _detection_cache.get(domain)
+
 
 class Dispatcher:
-    """Routes captcha solving requests with adaptive engine priority and optional racing."""
+    """Routes captcha solving with adaptive priority, parallel racing, and arbitration window."""
 
     def __init__(self, engines: dict):
         self.engines = engines
-        self._stats_fn = None  # set externally for adaptive routing
+        self._stats_fn = None
+        # Rolling engine performance for telemetry-driven ordering
+        self._engine_perf: dict[str, dict] = {}
 
     def set_stats_provider(self, stats_fn):
         """Set a callable that returns solve stats for adaptive routing."""
         self._stats_fn = stats_fn
 
+    def _record_engine_result(self, engine_name: str, success: bool, latency_ms: int):
+        """Record engine performance for rolling telemetry-driven ordering."""
+        if engine_name not in self._engine_perf:
+            self._engine_perf[engine_name] = {"successes": 0, "total": 0, "latency_sum": 0}
+        perf = self._engine_perf[engine_name]
+        perf["total"] += 1
+        if success:
+            perf["successes"] += 1
+        perf["latency_sum"] += latency_ms
+
     def _get_adaptive_priority(self, ctype: CaptchaType) -> list[str]:
         """Reorder engine priority based on historical success rate and latency."""
         base_priority = DEFAULT_ROUTING.get(ctype, [])
-        if not config.adaptive_routing_enabled or not self._stats_fn or len(base_priority) <= 1:
+        if not config.adaptive_routing_enabled or len(base_priority) <= 1:
             return base_priority
 
+        # Use rolling stats first, fall back to telemetry DB
+        scored = []
+        for eng_name in base_priority:
+            perf = self._engine_perf.get(eng_name, {})
+            total = perf.get("total", 0)
+
+            if total < config.adaptive_min_samples:
+                scored.append((eng_name, -1))
+                continue
+
+            success_rate = (perf["successes"] / total * 100) if total > 0 else 0
+            avg_ms = (perf["latency_sum"] / total) if total > 0 else 99999
+            score = success_rate * 1000 - avg_ms * 0.1
+            scored.append((eng_name, score))
+
+        has_data = [(n, s) for n, s in scored if s >= 0]
+        no_data = [n for n, s in scored if s < 0]
+
+        if not has_data:
+            # Fall back to stats provider
+            if self._stats_fn:
+                return self._get_priority_from_stats(ctype, base_priority)
+            return base_priority
+
+        has_data.sort(key=lambda x: x[1], reverse=True)
+        reordered = [n for n, _ in has_data] + no_data
+
+        if reordered != base_priority:
+            logger.info(f"Adaptive routing for {ctype.value}: {base_priority} -> {reordered}")
+        return reordered
+
+    def _get_priority_from_stats(self, ctype: CaptchaType, base_priority: list[str]) -> list[str]:
+        """Fall back to external stats for routing decisions."""
         try:
             stats = self._stats_fn(hours=24)
             by_engine = stats.get("by_engine", {})
@@ -70,27 +129,18 @@ class Dispatcher:
                 eng_stats = by_engine.get(eng_name, {})
                 total = eng_stats.get("total", 0)
                 if total < config.adaptive_min_samples:
-                    scored.append((eng_name, -1))  # not enough data, keep original position
+                    scored.append((eng_name, -1))
                     continue
                 success_rate = eng_stats.get("success_rate", 0)
                 avg_ms = eng_stats.get("avg_solve_ms", 99999)
-                # Score: higher success rate is better, lower latency is better
                 score = success_rate * 1000 - avg_ms * 0.1
                 scored.append((eng_name, score))
 
-            # Sort: engines with data by score (desc), engines without data keep relative order
             has_data = [(n, s) for n, s in scored if s >= 0]
             no_data = [n for n, s in scored if s < 0]
-
             has_data.sort(key=lambda x: x[1], reverse=True)
-            reordered = [n for n, _ in has_data] + no_data
-
-            if reordered != base_priority:
-                logger.info(f"Adaptive routing for {ctype.value}: {base_priority} -> {reordered}")
-            return reordered
-
-        except Exception as e:
-            logger.debug(f"Adaptive routing failed, using default: {e}")
+            return [n for n, _ in has_data] + no_data
+        except Exception:
             return base_priority
 
     async def _solve_single_engine(self, engine, engine_name: str, request: SolveRequest,
@@ -107,7 +157,7 @@ class Dispatcher:
 
     async def _solve_racing(self, engines_to_race: list[tuple], request: SolveRequest,
                              detection: DetectionResult | None, start: float) -> SolveResult | None:
-        """Race multiple engines in parallel, return first success."""
+        """Race engines in parallel with 250ms arbitration window for best-result selection."""
         tasks = {}
         for engine, engine_name in engines_to_race:
             task = asyncio.create_task(
@@ -116,7 +166,9 @@ class Dispatcher:
             )
             tasks[task] = engine_name
 
+        first_success: SolveResult | None = None
         last_error = None
+
         try:
             pending = set(tasks.keys())
             while pending:
@@ -125,30 +177,76 @@ class Dispatcher:
                     eng_name = tasks[task]
                     try:
                         result = task.result()
+                        elapsed_ms = int((time.time() - start) * 1000)
+
                         if result.get("success"):
-                            # Cancel remaining tasks
-                            for p in pending:
-                                p.cancel()
-                            elapsed_ms = int((time.time() - start) * 1000)
-                            return SolveResult(
+                            candidate = SolveResult(
                                 success=True,
                                 token=result.get("token"),
                                 engine_used=eng_name,
                                 confidence=result.get("confidence", 0.0),
                                 solve_time_ms=elapsed_ms,
                             )
-                        last_error = result.get("error", f"{eng_name} failed")
-                        logger.info(f"Racing: {eng_name} returned success=false: {last_error}")
+                            self._record_engine_result(eng_name, True, elapsed_ms)
+
+                            if first_success is None:
+                                first_success = candidate
+
+                                # Arbitration window: wait up to 250ms for potentially better results
+                                if pending and config.arbitration_window_ms > 0:
+                                    try:
+                                        arb_done, pending = await asyncio.wait(
+                                            pending,
+                                            timeout=config.arbitration_window_ms / 1000,
+                                        )
+                                        for arb_task in arb_done:
+                                            arb_name = tasks[arb_task]
+                                            try:
+                                                arb_result = arb_task.result()
+                                                arb_elapsed = int((time.time() - start) * 1000)
+                                                if arb_result.get("success"):
+                                                    arb_candidate = SolveResult(
+                                                        success=True,
+                                                        token=arb_result.get("token"),
+                                                        engine_used=arb_name,
+                                                        confidence=arb_result.get("confidence", 0.0),
+                                                        solve_time_ms=arb_elapsed,
+                                                    )
+                                                    self._record_engine_result(arb_name, True, arb_elapsed)
+                                                    # Pick higher confidence or faster result
+                                                    if arb_candidate.confidence > first_success.confidence:
+                                                        first_success = arb_candidate
+                                                else:
+                                                    self._record_engine_result(arb_name, False, arb_elapsed)
+                                            except Exception:
+                                                pass
+                                    except Exception:
+                                        pass
+
+                                # Cancel remaining and return best
+                                for p in pending:
+                                    p.cancel()
+                                return first_success
+                            else:
+                                # Already have a winner, compare
+                                if candidate.confidence > first_success.confidence:
+                                    first_success = candidate
+                        else:
+                            self._record_engine_result(eng_name, False, elapsed_ms)
+                            last_error = result.get("error", f"{eng_name} failed")
+                            logger.info(f"Racing: {eng_name} returned success=false: {last_error}")
                     except Exception as e:
                         last_error = str(e)
                         logger.exception(f"Racing: {eng_name} raised exception: {e}")
         except Exception as e:
             last_error = str(e)
 
-        return None  # no engine succeeded
+        if first_success:
+            return first_success
+        return None
 
     async def solve(self, request: SolveRequest, detection: DetectionResult | None = None) -> SolveResult:
-        """Solve a captcha using adaptive routing with optional engine racing."""
+        """Solve a captcha using adaptive routing with engine racing and arbitration."""
         start = time.time()
 
         if detection is None:
@@ -162,6 +260,13 @@ class Dispatcher:
                 error="Could not determine captcha type. Provide captcha_type explicitly.",
                 engine_used="none",
             )
+
+        # Cache detection for this domain
+        if request.pageurl:
+            from urllib.parse import urlparse
+            domain = urlparse(request.pageurl).netloc
+            if domain:
+                cache_detection(domain, ctype)
 
         engine_priority = self._get_adaptive_priority(ctype)
         available_engines = [(self.engines[n], n) for n in engine_priority if n in self.engines]
@@ -181,7 +286,6 @@ class Dispatcher:
             result = await self._solve_racing(available_engines, request, detection, start)
             if result:
                 return result
-            # All engines failed in racing mode
             elapsed_ms = int((time.time() - start) * 1000)
             return SolveResult(
                 success=False,
@@ -198,6 +302,7 @@ class Dispatcher:
 
                 if result.get("success"):
                     elapsed_ms = int((time.time() - start) * 1000)
+                    self._record_engine_result(try_name, True, elapsed_ms)
                     return SolveResult(
                         success=True,
                         token=result.get("token"),
@@ -206,6 +311,8 @@ class Dispatcher:
                         solve_time_ms=elapsed_ms,
                     )
 
+                elapsed_ms = int((time.time() - start) * 1000)
+                self._record_engine_result(try_name, False, elapsed_ms)
                 last_error = result.get("error", f"{try_name} failed")
                 logger.info(f"Engine {try_name} returned success=false: {last_error}, trying next...")
 

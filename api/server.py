@@ -1,4 +1,4 @@
-"""FastAPI server exposing the captcha solver as an API."""
+"""FastAPI server exposing the captcha solver as an API — v2.1.0."""
 
 import asyncio
 import base64
@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from config import config
 from detector.captcha_detector import detect_from_html, CaptchaType
-from router.dispatcher import Dispatcher, SolveRequest, SolveResult
+from router.dispatcher import Dispatcher, SolveRequest, SolveResult, get_cached_detection
 from engines.ocr_engine import OCREngine
 from engines.vision_engine import VisionEngine
 from engines.audio_engine import AudioEngine
@@ -47,39 +47,36 @@ def _build_engines() -> dict:
 
 
 dispatcher = Dispatcher(engines=_build_engines())
-# Wire adaptive routing stats
 dispatcher.set_stats_provider(get_stats)
-
-# Test runner (uses dispatcher)
 test_runner = RandomSiteRunner(dispatcher=dispatcher)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
-    logger.info("Captcha Solver Core starting up...")
+    logger.info("Captcha Solver Core v2.1.0 starting up...")
 
-    # Speed Boost #7: YOLO warm-start at boot
-    logger.info("Warm-starting YOLO model...")
+    # Speed Boost: YOLO + CLIP warm-start at boot
+    logger.info("Warm-starting YOLO + CLIP models...")
     try:
         vision_engine = dispatcher.engines.get("vision")
         if vision_engine:
-            vision_engine._load_yolo()
-            logger.info("YOLO model warm-started successfully")
+            vision_engine.warm_start()
+            logger.info("YOLO + CLIP models warm-started successfully")
     except Exception as e:
-        logger.warning(f"YOLO warm-start failed (will lazy-load on first request): {e}")
+        logger.warning(f"Model warm-start failed (will lazy-load on first request): {e}")
 
-    # Speed Boost #1: Start browser pool
+    # Start browser pool (adaptive scaling enabled)
     try:
         await browser_pool.start()
-        logger.info(f"Browser pool started: {browser_pool.active_count} contexts")
+        logger.info(f"Browser pool started: {browser_pool.active_count} contexts (max={browser_pool.max_size})")
     except Exception as e:
         logger.warning(f"Browser pool start failed: {e}")
 
     # Start scheduler in background
     scheduler_task = asyncio.create_task(scheduler.run_scheduler())
 
-    # Start random site test scheduler
+    # Start random site benchmark scheduler
     test_runner.start_scheduler(interval_hours=config.test_runner_interval_hours)
 
     yield
@@ -96,8 +93,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Captcha Solver Core",
-    description="Modular local captcha solving API — OCR, Vision, Audio, Token Harvest, Behavior Simulation",
-    version="2.0.0",
+    description="Modular captcha solving API with engine racing, adaptive routing, and continuous benchmarking",
+    version="2.1.0",
     lifespan=lifespan,
 )
 
@@ -141,6 +138,7 @@ class DetectResponseModel(BaseModel):
     sitekey: str | None = None
     iframe_src: str | None = None
     confidence: float = 0.0
+    cached: bool = False
 
 
 class HarvestTargetModel(BaseModel):
@@ -188,14 +186,9 @@ async def solve_captcha(req: SolveRequestModel):
         extra=req.extra,
     )
 
-    # Auto-detect if needed
     detection = None
-    if req.captcha_type == "auto" and req.pageurl:
-        pass
-
     result = await dispatcher.solve(solve_req, detection)
 
-    # Log telemetry
     log_solve(
         req.captcha_type, result.engine_used, result.success,
         result.confidence, result.solve_time_ms,
@@ -245,13 +238,28 @@ async def solve_image_captcha(file: UploadFile = File(...), captcha_type: str = 
 
 @app.post("/detect", response_model=DetectResponseModel)
 async def detect_captcha(req: DetectRequestModel):
-    """Detect captcha type from HTML source."""
+    """Detect captcha type from HTML source. Uses domain cache for repeat lookups."""
+    # Check detector cache first
+    from_cache = False
+    if req.url and config.detector_cache_enabled:
+        from urllib.parse import urlparse
+        domain = urlparse(req.url).netloc
+        cached_type = get_cached_detection(domain)
+        if cached_type:
+            from_cache = True
+            return DetectResponseModel(
+                captcha_type=cached_type.value,
+                confidence=0.95,
+                cached=True,
+            )
+
     result = detect_from_html(req.html)
     return DetectResponseModel(
         captcha_type=result.captcha_type.value,
         sitekey=result.sitekey,
         iframe_src=result.iframe_src,
         confidence=result.confidence,
+        cached=False,
     )
 
 
@@ -315,6 +323,33 @@ async def run_random_tests():
     return summary
 
 
+@app.post("/benchmark/run")
+async def run_benchmark():
+    """Run a full benchmark evaluation pass. Returns summary with fastest/slowest engines."""
+    summary = await test_runner.run_once()
+    return {
+        "runs_completed": summary["tests_run"],
+        "detections_successful": summary["detections_successful"],
+        "solves_successful": summary["solves_successful"],
+        "avg_latency_ms": summary["avg_latency_ms"],
+        "fastest_engine": summary.get("fastest_engine"),
+        "slowest_engine": summary.get("slowest_engine"),
+        "rolling_stats": summary.get("rolling_stats", {}),
+    }
+
+
+@app.get("/benchmark/history")
+async def benchmark_history(days: int = 7):
+    """Get rolling 7-day benchmark performance history."""
+    return test_runner.get_history(days)
+
+
+@app.get("/benchmark/rolling")
+async def benchmark_rolling_stats():
+    """Get current rolling performance statistics per engine."""
+    return test_runner.get_rolling_stats()
+
+
 @app.get("/test_runner/results")
 async def test_runner_results(count: int = 20):
     """Get recent random-site test results."""
@@ -333,11 +368,13 @@ async def test_runner_status():
 
 @app.get("/pool/status")
 async def pool_status():
-    """Get browser pool status."""
+    """Get browser pool status (including adaptive scaling info)."""
     return {
         "active": browser_pool.active_count,
         "busy": browser_pool.busy_count,
         "pool_size": browser_pool.size,
+        "max_size": browser_pool.max_size,
+        "queue_depth": browser_pool.queue_depth,
     }
 
 
@@ -346,19 +383,25 @@ async def health():
     """Health check."""
     return {
         "status": "ok",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "engines": list(dispatcher.engines.keys()),
         "cache": cache.get_stats(),
         "browser_pool": {
             "active": browser_pool.active_count,
             "busy": browser_pool.busy_count,
+            "max_size": browser_pool.max_size,
+            "queue_depth": browser_pool.queue_depth,
         },
         "features": {
             "engine_racing": config.engine_racing_enabled,
+            "arbitration_window_ms": config.arbitration_window_ms,
             "adaptive_routing": config.adaptive_routing_enabled,
+            "detector_cache": config.detector_cache_enabled,
             "memory_cache": config.cache_use_memory,
             "whisper_model": config.whisper_model,
             "browser_pool_size": config.browser_pool_size,
+            "browser_pool_max_size": config.browser_pool_max_size,
+            "clip_preloaded": True,
         },
     }
 
@@ -367,20 +410,23 @@ async def health():
 async def root():
     return {
         "service": "Captcha Solver Core",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "endpoints": {
             "POST /solve": "Solve a captcha (main endpoint)",
             "POST /solve/image": "Solve from uploaded image",
-            "POST /detect": "Detect captcha type from HTML",
+            "POST /detect": "Detect captcha type from HTML (cached by domain)",
+            "POST /benchmark/run": "Run full benchmark evaluation",
+            "GET /benchmark/history": "Rolling 7-day benchmark history",
+            "GET /benchmark/rolling": "Rolling engine performance stats",
+            "POST /run_random_tests": "Run random site captcha tests",
+            "GET /test_runner/results": "Get recent test results",
+            "GET /test_runner/status": "Test runner scheduler status",
             "POST /harvest/add": "Add pre-harvest target",
             "POST /harvest/start": "Start token pre-harvest daemon",
             "GET /harvest/status": "Pre-harvest daemon status",
             "GET /cache/stats": "Token cache statistics",
             "GET /stats": "Solver telemetry",
-            "POST /run_random_tests": "Run random site captcha tests",
-            "GET /test_runner/results": "Get recent test results",
-            "GET /test_runner/status": "Test runner scheduler status",
-            "GET /pool/status": "Browser pool status",
+            "GET /pool/status": "Browser pool status (adaptive scaling)",
             "GET /health": "Health check",
         },
     }

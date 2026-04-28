@@ -66,8 +66,9 @@ class Config:
     farm_profile_count: int = 5
     farm_warmup_duration_min: int = 3
 
-    # Browser pool
+    # Browser pool (adaptive scaling)
     browser_pool_size: int = 3
+    browser_pool_max_size: int = 5  # auto-scale up to this when queue > 2
 
     # Scheduler
     profile_rotation_interval_hours: int = 12
@@ -78,10 +79,14 @@ class Config:
 
     # Async engine racing
     engine_racing_enabled: bool = True  # race engines in parallel (FIRST_COMPLETED)
+    arbitration_window_ms: int = 250  # wait this long for potentially better result after first success
 
     # Telemetry-guided routing
     adaptive_routing_enabled: bool = True  # reorder engine priority based on stats
     adaptive_min_samples: int = 5  # min solves before adapting
+
+    # Detector result caching
+    detector_cache_enabled: bool = True  # cache domain -> captcha_type mapping
 
     # Logging
     log_level: str = "INFO"

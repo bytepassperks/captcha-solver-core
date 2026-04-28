@@ -50,6 +50,11 @@ class VisionEngine:
                 logger.warning(f"CLIP load failed, falling back to YOLO-only: {e}")
         return self._clip_model
 
+    def warm_start(self):
+        """Pre-load both YOLO and CLIP models for instant inference."""
+        self._load_yolo()
+        self._load_clip()
+
     def _split_grid(self, img: np.ndarray, rows: int = 3, cols: int = 3) -> list[np.ndarray]:
         """Split image into grid tiles."""
         h, w = img.shape[:2]

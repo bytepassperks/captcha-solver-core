@@ -60,8 +60,9 @@ COPY . .
 RUN mkdir -p profiles/cookie_farm profiles/chrome_data dataset/captcha_tiles models logs cache && \
     chmod +x start.sh
 
-# Speed Boost #2: Preload YOLO + Whisper models during build (removes runtime download delay)
+# Speed Boost: Preload YOLO + CLIP + Whisper models during build (removes runtime download delay)
 RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')" && \
+    python -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_s34b_b79k')" && \
     python -c "import whisper; whisper.load_model('tiny')"
 
 # Persistent volume mount point for browser profiles (cookies survive restarts)

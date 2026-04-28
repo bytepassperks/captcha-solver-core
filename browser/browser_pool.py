@@ -1,4 +1,4 @@
-"""Persistent browser pool — pre-launched Chromium contexts for instant page creation."""
+"""Persistent browser pool with adaptive scaling — pre-launched Chromium contexts for instant page creation."""
 
 import asyncio
 import logging
@@ -13,38 +13,65 @@ logger = logging.getLogger(__name__)
 
 class BrowserPool:
     """
-    Maintains a pool of pre-launched browser contexts.
+    Maintains a pool of pre-launched browser contexts with adaptive scaling.
     Eliminates 2.5s browser launch overhead per request.
 
-    Each pool slot is a PersistentBrowserRunner with its own profile directory,
-    allowing cookie/session isolation between concurrent tasks.
+    When all slots are busy and queue_length > 2, auto-scales up to max_size.
     """
 
-    def __init__(self, size: int | None = None):
+    def __init__(self, size: int | None = None, max_size: int | None = None):
         self.size = size or config.browser_pool_size
+        self.max_size = max_size or config.browser_pool_max_size
         self._runners: list[PersistentBrowserRunner] = []
         self._locks: list[asyncio.Lock] = []
         self._initialized = False
+        self._scaling_lock = asyncio.Lock()
+        self._queue_depth = 0
 
     async def start(self):
         """Pre-launch all browser contexts in the pool."""
         if self._initialized:
             return
 
-        logger.info(f"Starting browser pool with {self.size} contexts...")
+        logger.info(f"Starting browser pool with {self.size} contexts (max={self.max_size})...")
         for i in range(self.size):
-            profile_name = f"pool_{i:03d}"
-            runner = PersistentBrowserRunner(profile_name=profile_name)
-            try:
-                await runner.start()
-                self._runners.append(runner)
-                self._locks.append(asyncio.Lock())
-                logger.info(f"Pool slot {i} ready (profile={profile_name})")
-            except Exception as e:
-                logger.error(f"Failed to start pool slot {i}: {e}")
+            await self._add_slot(i)
 
         self._initialized = True
         logger.info(f"Browser pool started: {len(self._runners)}/{self.size} slots active")
+
+    async def _add_slot(self, index: int | None = None) -> bool:
+        """Add a new browser slot to the pool."""
+        if index is None:
+            index = len(self._runners)
+        if index >= self.max_size:
+            return False
+
+        profile_name = f"pool_{index:03d}"
+        runner = PersistentBrowserRunner(profile_name=profile_name)
+        try:
+            await runner.start()
+            self._runners.append(runner)
+            self._locks.append(asyncio.Lock())
+            logger.info(f"Pool slot {index} ready (profile={profile_name})")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to start pool slot {index}: {e}")
+            return False
+
+    async def _maybe_scale_up(self):
+        """Auto-scale the pool if all slots are busy and demand is high."""
+        if len(self._runners) >= self.max_size:
+            return
+        if self._queue_depth <= 2:
+            return
+
+        async with self._scaling_lock:
+            if len(self._runners) >= self.max_size:
+                return
+            new_idx = len(self._runners)
+            logger.info(f"Adaptive scaling: adding pool slot {new_idx} (queue_depth={self._queue_depth})")
+            await self._add_slot(new_idx)
 
     async def acquire(self) -> tuple[PersistentBrowserRunner, int]:
         """
@@ -54,15 +81,22 @@ class BrowserPool:
         if not self._initialized:
             await self.start()
 
+        self._queue_depth += 1
+
         # Try to acquire any unlocked slot
         for idx, lock in enumerate(self._locks):
             if not lock.locked():
                 await lock.acquire()
+                self._queue_depth -= 1
                 return self._runners[idx], idx
 
-        # All slots busy — wait for the first available
+        # All slots busy — try adaptive scaling
+        await self._maybe_scale_up()
+
+        # Wait for the first available
         slot_idx = random.randint(0, len(self._locks) - 1)
         await self._locks[slot_idx].acquire()
+        self._queue_depth -= 1
         return self._runners[slot_idx], slot_idx
 
     def release(self, slot_index: int):
@@ -79,7 +113,6 @@ class BrowserPool:
         if not self._runners:
             return None
 
-        # Round-robin through runners without locking (for non-exclusive use)
         runner = random.choice(self._runners)
         return await runner.get_page()
 
@@ -102,3 +135,7 @@ class BrowserPool:
     @property
     def busy_count(self) -> int:
         return sum(1 for lock in self._locks if lock.locked())
+
+    @property
+    def queue_depth(self) -> int:
+        return self._queue_depth
