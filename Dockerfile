@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-# System deps for Tesseract, OpenCV, Playwright, xvfb
+# System deps for Tesseract, OpenCV, Playwright
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-eng \
@@ -11,9 +11,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     ffmpeg \
     wget \
-    xvfb \
-    dbus \
-    xauth \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -49,16 +46,18 @@ RUN pip install --no-cache-dir playwright && \
     playwright install chromium && \
     playwright install-deps chromium
 
-# Preload YOLOv8 weights during build (avoids 30s download on first request)
-RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')" && \
-    mv yolov8n.pt /tmp/yolov8n.pt || true
+# Add xvfb AFTER all heavy installs (so pip layers stay cached)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    xvfb \
+    dbus \
+    xauth \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy application
 COPY . .
 
-# Create required directories and move preloaded model
-RUN mkdir -p profiles/cookie_farm profiles/chrome_data dataset/captcha_tiles models logs cache && \
-    (mv /tmp/yolov8n.pt models/yolov8n.pt 2>/dev/null || true)
+# Create required directories
+RUN mkdir -p profiles/cookie_farm profiles/chrome_data dataset/captcha_tiles models logs cache
 
 # Persistent volume mount point for browser profiles (cookies survive restarts)
 VOLUME /app/profiles
