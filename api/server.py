@@ -1,4 +1,4 @@
-"""FastAPI server exposing the captcha solver as an API — v2.1.0."""
+"""FastAPI server exposing the captcha solver as an API — v2.2.0."""
 
 import asyncio
 import base64
@@ -25,6 +25,9 @@ from engines.preharvest_daemon import PreharvestDaemon
 from scheduler.profile_scheduler import ProfileScheduler
 from test_runner.random_site_runner import RandomSiteRunner
 from logs import setup_logging, log_solve, get_stats
+from vpn_router.manager import VPNManager
+from vpn_router.profile_map import ProfileRegionMap
+from vpn_router.scheduler import VPNRotationScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,9 @@ browser_pool = BrowserPool()
 browser_runner = PersistentBrowserRunner()
 scheduler = ProfileScheduler()
 daemon = PreharvestDaemon(cache=cache)
+vpn_manager = VPNManager()
+vpn_profile_map = ProfileRegionMap()
+vpn_scheduler = VPNRotationScheduler(manager=vpn_manager, profile_map=vpn_profile_map)
 
 
 def _build_engines() -> dict:
@@ -54,7 +60,7 @@ test_runner = RandomSiteRunner(dispatcher=dispatcher)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
-    logger.info("Captcha Solver Core v2.1.0 starting up...")
+    logger.info("Captcha Solver Core v2.2.0 starting up...")
 
     # Speed Boost: YOLO warm-start at boot (CLIP lazy-loads on first vision request — too heavy for boot)
     logger.info("Warm-starting YOLO model...")
@@ -82,13 +88,29 @@ async def lifespan(app: FastAPI):
     # Start random site benchmark scheduler
     test_runner.start_scheduler(interval_hours=config.test_runner_interval_hours)
 
+    # Initialize VPN identity routing
+    if config.vpn_enabled:
+        available = vpn_manager.available_providers
+        logger.info(f"VPN routing enabled, available providers: {available or 'none (will use direct connection)'}")
+        # Assign regions to browser pool profiles
+        for i in range(browser_pool.active_count):
+            profile_name = f"pool_{i:03d}"
+            provider = available[0] if available else "none"
+            vpn_profile_map.assign(profile_name, provider)
+        # Start rotation scheduler
+        vpn_scheduler.start()
+    else:
+        logger.info("VPN routing disabled")
+
     yield
 
     # Shutdown
+    vpn_scheduler.stop()
     scheduler.stop()
     scheduler_task.cancel()
     test_runner.stop_scheduler()
     await daemon.stop()
+    await vpn_manager.disconnect()
     await browser_pool.stop()
     await browser_runner.stop()
     logger.info("Captcha Solver Core shut down.")
@@ -96,8 +118,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Captcha Solver Core",
-    description="Modular captcha solving API with engine racing, adaptive routing, and continuous benchmarking",
-    version="2.1.0",
+    description="Modular captcha solving API with engine racing, adaptive routing, VPN identity routing, and continuous benchmarking",
+    version="2.2.0",
     lifespan=lifespan,
 )
 
@@ -390,12 +412,42 @@ async def pool_status():
     }
 
 
+@app.get("/vpn/status")
+async def vpn_status():
+    """Get VPN identity routing status."""
+    manager_status = await vpn_manager.get_status()
+    scheduler_status = vpn_scheduler.get_status()
+    return {
+        **manager_status,
+        "rotation": scheduler_status,
+        "profile_mapping": vpn_profile_map.to_dict(),
+    }
+
+
+@app.post("/vpn/rotate")
+async def vpn_force_rotate():
+    """Force an immediate VPN region rotation."""
+    result = await vpn_scheduler.force_rotate()
+    return result
+
+
+@app.post("/vpn/connect")
+async def vpn_connect(region: str = "us"):
+    """Connect to a specific VPN region."""
+    success = await vpn_manager.connect(region)
+    return {
+        "success": success,
+        "provider": vpn_manager.active_provider_name,
+        "region": vpn_manager.active_region,
+    }
+
+
 @app.get("/health")
 async def health():
     """Health check."""
     return {
         "status": "ok",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "engines": list(dispatcher.engines.keys()),
         "cache": cache.get_stats(),
         "browser_pool": {
@@ -403,6 +455,14 @@ async def health():
             "busy": browser_pool.busy_count,
             "max_size": browser_pool.max_size,
             "queue_depth": browser_pool.queue_depth,
+        },
+        "vpn": {
+            "enabled": config.vpn_enabled,
+            "connected": vpn_manager.is_connected,
+            "provider": vpn_manager.active_provider_name,
+            "region": vpn_manager.active_region,
+            "available_providers": vpn_manager.available_providers,
+            "rotation_interval": config.vpn_rotation_interval,
         },
         "features": {
             "engine_racing": config.engine_racing_enabled,
@@ -414,6 +474,7 @@ async def health():
             "browser_pool_size": config.browser_pool_size,
             "browser_pool_max_size": config.browser_pool_max_size,
             "clip_mode": "lazy_load",
+            "vpn_identity_routing": config.vpn_enabled,
         },
     }
 
@@ -422,7 +483,7 @@ async def health():
 async def root():
     return {
         "service": "Captcha Solver Core",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "endpoints": {
             "POST /solve": "Solve a captcha (main endpoint)",
             "POST /solve/image": "Solve from uploaded image",
@@ -439,6 +500,9 @@ async def root():
             "GET /cache/stats": "Token cache statistics",
             "GET /stats": "Solver telemetry",
             "GET /pool/status": "Browser pool status (adaptive scaling)",
+            "GET /vpn/status": "VPN identity routing status",
+            "POST /vpn/rotate": "Force VPN region rotation",
+            "POST /vpn/connect": "Connect to specific VPN region",
             "GET /health": "Health check",
         },
     }

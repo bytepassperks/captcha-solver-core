@@ -88,6 +88,15 @@ class Config:
     # Detector result caching
     detector_cache_enabled: bool = True  # cache domain -> captcha_type mapping
 
+    # VPN identity routing
+    vpn_enabled: bool = bool(os.getenv("VPN_ENABLED", "true").lower() in ("true", "1"))
+    vpn_provider_priority: list = field(default_factory=lambda: [
+        "expressvpn",
+        "protonvpn",
+        "windscribe",
+    ])
+    vpn_rotation_interval: int = int(os.getenv("VPN_ROTATION_INTERVAL", "14400"))  # 4 hours
+
     # Logging
     log_level: str = "INFO"
     log_to_file: bool = True
