@@ -24,6 +24,7 @@ class OCREngine:
     def __init__(self):
         pytesseract.pytesseract.tesseract_cmd = config.tesseract_cmd
         self._claude_available = bool(config.claude_api_key)
+        self._bedrock_available = bool(config.aws_access_key_id and config.aws_secret_access_key)
 
     def _scale_up(self, img: np.ndarray, target_height: int = 100) -> np.ndarray:
         """Scale image to a minimum height for better OCR."""
@@ -251,7 +252,7 @@ class OCREngine:
         return "image/png"
 
     async def _solve_claude(self, raw_bytes: bytes) -> dict | None:
-        """Use Claude Vision to read captcha text — near-perfect accuracy."""
+        """Use Claude Vision (PageGrid proxy) to read captcha text."""
         if not self._claude_available:
             return None
 
@@ -297,22 +298,84 @@ class OCREngine:
             text = data.get("content", [{}])[0].get("text", "").strip()
             cleaned = "".join(c for c in text if c.isalnum())
             if cleaned:
-                logger.info(f"Claude Vision result: '{cleaned}'")
+                logger.info(f"Claude Vision (PageGrid) result: '{cleaned}'")
                 return {
                     "success": True,
                     "token": cleaned,
                     "confidence": 0.99,
-                    "pipeline": "claude_vision",
+                    "pipeline": "claude_vision_pagegrid",
                 }
             return None
         except Exception as e:
-            logger.warning(f"Claude Vision failed: {e}")
+            logger.warning(f"Claude Vision (PageGrid) failed: {e}")
+            return None
+
+    async def _solve_bedrock(self, raw_bytes: bytes) -> dict | None:
+        """Use AWS Bedrock Claude Vision to read captcha text."""
+        if not self._bedrock_available:
+            return None
+
+        try:
+            import boto3
+            import json as json_mod
+
+            img_b64 = base64.b64encode(raw_bytes).decode()
+            media_type = self._detect_media_type(raw_bytes)
+
+            bedrock = boto3.client(
+                'bedrock-runtime',
+                region_name=config.aws_region,
+                aws_access_key_id=config.aws_access_key_id,
+                aws_secret_access_key=config.aws_secret_access_key,
+            )
+
+            resp = bedrock.invoke_model(
+                modelId=config.aws_bedrock_model,
+                contentType='application/json',
+                accept='application/json',
+                body=json_mod.dumps({
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 50,
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": img_b64,
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": "Read the captcha text in this image. Reply with ONLY the exact characters you see, nothing else.",
+                            },
+                        ],
+                    }],
+                }),
+            )
+
+            result = json_mod.loads(resp['body'].read())
+            text = result.get("content", [{}])[0].get("text", "").strip()
+            cleaned = "".join(c for c in text if c.isalnum())
+            if cleaned:
+                logger.info(f"Claude Vision (Bedrock) result: '{cleaned}'")
+                return {
+                    "success": True,
+                    "token": cleaned,
+                    "confidence": 0.98,
+                    "pipeline": "claude_vision_bedrock",
+                }
+            return None
+        except Exception as e:
+            logger.warning(f"Claude Vision (Bedrock) failed: {e}")
             return None
 
     async def solve(self, captcha_type=None, pageurl="", sitekey=None,
                     image_data=None, image_url=None, extra=None) -> dict:
-        """Solve a text captcha. Uses Claude Vision (primary) with Tesseract fallback."""
-        # Get raw bytes for Claude Vision
+        """Solve a text captcha. Fallback chain: PageGrid Claude → AWS Bedrock Claude → Tesseract."""
+        # Get raw bytes for vision APIs
         raw_bytes = None
         if image_data:
             if isinstance(image_data, str):
@@ -327,11 +390,16 @@ class OCREngine:
             except Exception as e:
                 logger.error(f"Failed to download image from {image_url}: {e}")
 
-        # Priority 1: Claude Vision (near-perfect accuracy)
         if raw_bytes:
+            # Priority 1: Claude Vision via PageGrid
             claude_result = await self._solve_claude(raw_bytes)
             if claude_result:
                 return claude_result
+
+            # Priority 2: Claude Vision via AWS Bedrock
+            bedrock_result = await self._solve_bedrock(raw_bytes)
+            if bedrock_result:
+                return bedrock_result
 
         # Priority 2: Tesseract multi-pipeline (fallback)
         img = self._load_image(image_data, image_url)

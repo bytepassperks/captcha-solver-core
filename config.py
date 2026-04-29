@@ -49,6 +49,12 @@ class Config:
     claude_api_base: str = os.getenv("CLAUDE_API_BASE", "https://api.pagegrid.in/v1")
     claude_model: str = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 
+    # AWS Bedrock (Claude Vision fallback)
+    aws_access_key_id: str = os.getenv("AWS_ACCESS_KEY_ID", "")
+    aws_secret_access_key: str = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+    aws_region: str = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+    aws_bedrock_model: str = os.getenv("AWS_BEDROCK_MODEL", "us.anthropic.claude-3-haiku-20240307-v1:0")
+
     # Token cache (hot cache in-memory, persistent on disk)
     cache_db_path: str = str(BASE_DIR / "cache" / "tokens.db")
     cache_use_memory: bool = True  # SQLite :memory: for hot tokens
