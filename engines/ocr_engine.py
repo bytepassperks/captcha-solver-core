@@ -1,4 +1,4 @@
-"""OCR-based text captcha solver using Tesseract + multi-pipeline preprocessing."""
+"""OCR-based text captcha solver using Claude Vision (primary) + Tesseract (fallback)."""
 
 import io
 import logging
@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageFilter, ImageOps
 import pytesseract
+import httpx
 
 from config import config
 
@@ -18,10 +19,11 @@ CAPTCHA_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 
 class OCREngine:
-    """Solves text-based captchas using multi-pipeline preprocessing + Tesseract OCR."""
+    """Solves text-based captchas using Claude Vision (primary) + Tesseract (fallback)."""
 
     def __init__(self):
         pytesseract.pytesseract.tesseract_cmd = config.tesseract_cmd
+        self._claude_available = bool(config.claude_api_key)
 
     def _scale_up(self, img: np.ndarray, target_height: int = 100) -> np.ndarray:
         """Scale image to a minimum height for better OCR."""
@@ -236,9 +238,102 @@ class OCREngine:
 
         return None
 
+    def _detect_media_type(self, raw_bytes: bytes) -> str:
+        """Detect image media type from file header bytes."""
+        if raw_bytes[:3] == b'GIF':
+            return "image/gif"
+        if raw_bytes[:8] == bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]):
+            return "image/png"
+        if raw_bytes[:2] == b'\xff\xd8':
+            return "image/jpeg"
+        if raw_bytes[:4] == b'RIFF' and raw_bytes[8:12] == b'WEBP':
+            return "image/webp"
+        return "image/png"
+
+    async def _solve_claude(self, raw_bytes: bytes) -> dict | None:
+        """Use Claude Vision to read captcha text — near-perfect accuracy."""
+        if not self._claude_available:
+            return None
+
+        try:
+            img_b64 = base64.b64encode(raw_bytes).decode()
+            media_type = self._detect_media_type(raw_bytes)
+
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.post(
+                    f"{config.claude_api_base}/messages",
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-api-key": config.claude_api_key,
+                    },
+                    json={
+                        "model": config.claude_model,
+                        "max_tokens": 50,
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": media_type,
+                                        "data": img_b64,
+                                    },
+                                },
+                                {
+                                    "type": "text",
+                                    "text": "Read the captcha text in this image. Reply with ONLY the exact characters you see, nothing else.",
+                                },
+                            ],
+                        }],
+                    },
+                )
+
+            if resp.status_code != 200:
+                logger.warning(f"Claude Vision API error: {resp.status_code} {resp.text[:200]}")
+                return None
+
+            data = resp.json()
+            text = data.get("content", [{}])[0].get("text", "").strip()
+            cleaned = "".join(c for c in text if c.isalnum())
+            if cleaned:
+                logger.info(f"Claude Vision result: '{cleaned}'")
+                return {
+                    "success": True,
+                    "token": cleaned,
+                    "confidence": 0.99,
+                    "pipeline": "claude_vision",
+                }
+            return None
+        except Exception as e:
+            logger.warning(f"Claude Vision failed: {e}")
+            return None
+
     async def solve(self, captcha_type=None, pageurl="", sitekey=None,
                     image_data=None, image_url=None, extra=None) -> dict:
-        """Solve a text captcha using multi-pipeline OCR for best accuracy."""
+        """Solve a text captcha. Uses Claude Vision (primary) with Tesseract fallback."""
+        # Get raw bytes for Claude Vision
+        raw_bytes = None
+        if image_data:
+            if isinstance(image_data, str):
+                raw_bytes = base64.b64decode(image_data)
+            else:
+                raw_bytes = image_data
+        elif image_url:
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.get(image_url)
+                    raw_bytes = resp.content
+            except Exception as e:
+                logger.error(f"Failed to download image from {image_url}: {e}")
+
+        # Priority 1: Claude Vision (near-perfect accuracy)
+        if raw_bytes:
+            claude_result = await self._solve_claude(raw_bytes)
+            if claude_result:
+                return claude_result
+
+        # Priority 2: Tesseract multi-pipeline (fallback)
         img = self._load_image(image_data, image_url)
         if img is None:
             return {"success": False, "error": "No image provided or failed to load"}
@@ -290,7 +385,7 @@ class OCREngine:
             return {"success": False, "error": "OCR failed to extract text", "confidence": 0.0}
 
         confidence = min(best_conf / 100.0, 1.0)
-        logger.info(f"OCR result: '{best_text}' (pipeline={best_pipeline}, conf={confidence:.2f})")
+        logger.info(f"Tesseract result: '{best_text}' (pipeline={best_pipeline}, conf={confidence:.2f})")
         return {
             "success": True,
             "token": best_text,

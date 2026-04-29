@@ -44,6 +44,11 @@ class Config:
     firecrawl_api_key: str = os.getenv("FIRECRAWL_API_KEY", "")
     reducto_api_key: str = os.getenv("REDUCTO_API_KEY", "")
 
+    # Claude Vision (via PageGrid proxy) for captcha OCR
+    claude_api_key: str = os.getenv("CLAUDE_API_KEY", "")
+    claude_api_base: str = os.getenv("CLAUDE_API_BASE", "https://api.pagegrid.in/v1")
+    claude_model: str = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+
     # Token cache (hot cache in-memory, persistent on disk)
     cache_db_path: str = str(BASE_DIR / "cache" / "tokens.db")
     cache_use_memory: bool = True  # SQLite :memory: for hot tokens
